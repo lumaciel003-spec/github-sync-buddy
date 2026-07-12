@@ -104,13 +104,13 @@ serve(async (req) => {
   }
 
   try {
-    const secretKey = Deno.env.get('GHOSTSPAY_SECRET_KEY');
-    const companyId = Deno.env.get('GHOSTSPAY_COMPANY_ID');
+    const alphaPublicKey = Deno.env.get('ALPHACASH_PUBLIC_KEY');
+    const alphaSecretKey = Deno.env.get('ALPHACASH_SECRET_KEY');
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
-    if (!secretKey || !companyId) {
-      console.error('Missing GhostsPay API credentials');
+    if (!alphaPublicKey || !alphaSecretKey) {
+      console.error('Missing AlphaCash API credentials');
       return new Response(
         JSON.stringify({ error: 'Missing API credentials' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -128,50 +128,54 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     const { amount, customerName, customerEmail, customerCpf, customerPhone, eventId, items }: PaymentRequest = await req.json();
 
-    console.log('Creating PIX payment via GhostsPay:', { amount, customerName, customerEmail, eventId, itemsCount: items.length });
+    console.log('Creating PIX payment via AlphaCash:', { amount, customerName, customerEmail, eventId, itemsCount: items.length });
 
-    // GhostsPay uses Basic Auth: secretKey:companyId
-    const credentials = btoa(`${secretKey}:${companyId}`);
+    // AlphaCash uses Basic Auth: publicKey:secretKey
+    const credentials = btoa(`${alphaPublicKey}:${alphaSecretKey}`);
 
     const amountInCents = Math.round(amount * 100);
 
-    // Build items array for GhostsPay - always use generic product name
-    const ghostsPayItems = [{
+    // Build items array for AlphaCash
+    const alphaItems = [{
       title: 'LOTE PROMOCIONAL',
       unitPrice: amountInCents,
       quantity: 1,
+      tangible: false,
       externalRef: `gw_${Date.now()}`
     }];
 
-    // Build request body per GhostsPay API docs
+    // Build request body per AlphaCash API docs
     const requestBody = {
-      paymentMethod: 'PIX',
+      amount: amountInCents,
+      paymentMethod: 'pix',
+      items: alphaItems,
       customer: {
         name: customerName,
         email: customerEmail,
         phone: customerPhone.replace(/\D/g, ''),
-        document: customerCpf.replace(/\D/g, ''),
+        document: {
+          number: customerCpf.replace(/\D/g, ''),
+          type: 'cpf'
+        }
       },
-      items: ghostsPayItems,
-      amount: amountInCents,
       postbackUrl: `${supabaseUrl}/functions/v1/pix-webhook`,
-      metadata: {
+      metadata: JSON.stringify({
         source: 'guicheweb',
         eventId: eventId || null,
         customerName,
         customerEmail,
         customerCpf: customerCpf.replace(/\D/g, ''),
         customerPhone: customerPhone.replace(/\D/g, ''),
-        items: JSON.stringify(items)
-      },
-      ip: '127.0.0.1',
-      description: 'LOTE PROMOCIONAL'
+        items
+      }),
+      externalRef: `gw_${Date.now()}`,
+      ip: '127.0.0.1'
     };
 
-    console.log('GhostsPay request body:', JSON.stringify(requestBody));
+    console.log('AlphaCash request body:', JSON.stringify(requestBody));
 
-    // Call GhostsPay API
-    const ghostsPayResponse = await fetch('https://api.ghostspaysv2.com/functions/v1/transactions', {
+    // Call AlphaCash API
+    const alphaResponse = await fetch('https://api.alphacashpay.com.br/v1/transactions', {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${credentials}`,
@@ -181,14 +185,14 @@ serve(async (req) => {
       body: JSON.stringify(requestBody),
     });
 
-    console.log('GhostsPay response status:', ghostsPayResponse.status);
+    console.log('AlphaCash response status:', alphaResponse.status);
 
-    const responseText = await ghostsPayResponse.text();
-    console.log('GhostsPay response text:', responseText);
+    const responseText = await alphaResponse.text();
+    console.log('AlphaCash response text:', responseText);
 
-    let ghostsPayData;
+    let alphaData;
     try {
-      ghostsPayData = responseText ? JSON.parse(responseText) : {};
+      alphaData = responseText ? JSON.parse(responseText) : {};
     } catch (parseError) {
       console.error('Failed to parse response:', parseError);
       return new Response(
@@ -197,50 +201,48 @@ serve(async (req) => {
       );
     }
 
-    if (!ghostsPayResponse.ok) {
-      console.error('GhostsPay API error:', ghostsPayData);
+    if (!alphaResponse.ok) {
+      console.error('AlphaCash API error:', alphaData);
 
-      const errorMessage = JSON.stringify(ghostsPayData).toLowerCase();
+      const errorMessage = JSON.stringify(alphaData).toLowerCase();
       const isCpfError = errorMessage.includes('cpf') || errorMessage.includes('document') || errorMessage.includes('invalid');
 
       return new Response(
         JSON.stringify({
           error: isCpfError ? 'CPF inválido ou incorreto' : 'Failed to create PIX payment',
-          details: ghostsPayData,
+          details: alphaData,
           isCpfError
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // GhostsPay response: data.pix.qrcode contains the PIX copia-e-cola / QR code URL
-    const transactionData = ghostsPayData.data || ghostsPayData;
-    const transactionId = transactionData.id;
+    // AlphaCash response: data.pix.qrcode contains the PIX copia-e-cola
+    const transactionData = alphaData.data || alphaData;
+    const transactionId = String(transactionData.id);
     const pixData = transactionData.pix;
     const copiaCola = pixData?.qrcode;
 
     if (!copiaCola) {
-      console.error('Missing QR code data in response:', ghostsPayData);
+      console.error('Missing QR code data in response:', alphaData);
       return new Response(
-        JSON.stringify({ error: 'Invalid response from payment provider', debug: ghostsPayData }),
+        JSON.stringify({ error: 'Invalid response from payment provider', debug: alphaData }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
     // Generate QR code image URL from the PIX code
     const qrCodeUrl = copiaCola.startsWith('http')
-      ? copiaCola  // GhostsPay may return a URL directly
+      ? copiaCola
       : `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(copiaCola)}`;
 
-    // For copia-e-cola, if it's a URL we need the actual PIX code
-    // GhostsPay returns the qrcode field which can be either a URL or the PIX payload
-    const pixCopiaCola = copiaCola.startsWith('http') ? copiaCola : copiaCola;
+    const pixCopiaCola = copiaCola;
 
     // Save order to database
     const { error: insertError } = await supabase
       .from('orders')
       .insert({
-        transaction_id: transactionId || `GS_${Date.now()}`,
+        transaction_id: transactionId || `AC_${Date.now()}`,
         customer_name: customerName,
         customer_email: customerEmail,
         customer_cpf: customerCpf.replace(/\D/g, ''),
@@ -267,7 +269,7 @@ serve(async (req) => {
     }));
 
     const utmifyResult = await sendToUtmify({
-      orderId: transactionId || `GS_${Date.now()}`,
+      orderId: transactionId || `AC_${Date.now()}`,
       status: 'waiting_payment',
       createdAt: createdAtUTC,
       approvedDate: null,

@@ -77,16 +77,22 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     const payload = await req.json();
 
-    console.log('Received GhostsPay webhook:', JSON.stringify(payload));
+    console.log('Received AlphaCash webhook:', JSON.stringify(payload));
 
-    // GhostsPay webhook structure:
-    // { id, type, objectId, data: { id, amount (cents), status, customer, pix, metadata, ... } }
+    // AlphaCash webhook structure:
+    // { type, url, objectId, data: { id, amount (cents), status, customer, pix, metadata (string), ... } }
     const data = payload.data || payload;
-    const transactionId = data.id || payload.objectId || payload.id;
-    const status = data.status;
+    const transactionId = String(data.id || payload.objectId || payload.id || '');
+    // Normalize AlphaCash statuses: 'approved' is treated as paid
+    let status = data.status;
+    if (status === 'approved') status = 'paid';
     const amountInCents = data.amount;
     const customer = data.customer || {};
-    const metadata = data.metadata || {};
+    let metadata: any = data.metadata || {};
+    if (typeof metadata === 'string') {
+      try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
+    }
+    const customerDoc = customer.document?.number || customer.document || metadata.customerCpf || '';
 
     console.log('Parsed webhook data:', { transactionId, status, amountInCents });
 
@@ -133,7 +139,7 @@ serve(async (req) => {
           name: customer.name || metadata.customerName || 'Cliente',
           email: customer.email || metadata.customerEmail || '',
           phone: customer.phone || metadata.customerPhone || '',
-          document: customer.document || metadata.customerCpf || ''
+          document: customerDoc
         },
         products,
         totalPriceInCents: amountInCents,
@@ -169,7 +175,7 @@ serve(async (req) => {
           name: customer.name || metadata.customerName || 'Cliente',
           email: customer.email || metadata.customerEmail || '',
           phone: customer.phone || metadata.customerPhone || '',
-          document: customer.document || metadata.customerCpf || ''
+          document: customerDoc
         },
         products,
         totalPriceInCents: amountInCents,
@@ -184,8 +190,8 @@ serve(async (req) => {
       );
     }
 
-    // Handle REFUSED / FAILED / EXPIRED / CANCELED
-    if (['refused', 'failed', 'expired', 'canceled'].includes(status)) {
+    // Handle REFUSED / FAILED / EXPIRED / CANCELED / CHARGEBACK
+    if (['refused', 'failed', 'expired', 'canceled', 'cancelled', 'chargeback'].includes(status)) {
       console.log(`Payment ${status}! Transaction:`, transactionId);
 
       await supabase
