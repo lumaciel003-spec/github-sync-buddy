@@ -56,7 +56,7 @@
     "html2canvas": "^1.4.1",
     "input-otp": "^1.4.2",
     "jsbarcode": "^3.12.1",
-    "jspdf": "^3.0.4",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.462.0",
     "next-themes": "^0.3.0",
     "qrcode": "^1.5.4",

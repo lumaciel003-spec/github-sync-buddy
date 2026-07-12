@@ -65,16 +65,10 @@ const SearchOrdersDialog = ({ open, onOpenChange }: SearchOrdersDialogProps) => 
     setIsLoading(true);
 
     try {
-      const isEmail = searchValue.includes('@');
-      const searchField = isEmail ? 'customer_email' : 'customer_cpf';
-      const searchQuery = isEmail ? searchValue.trim() : searchValue.replace(/\D/g, '');
-
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq(searchField, searchQuery)
-        .eq('status', 'paid')
-        .order('created_at', { ascending: false });
+      const { data: resp, error } = await supabase.functions.invoke('orders-lookup', {
+        body: { action: 'search', value: searchValue.trim() },
+      });
+      const data = resp?.data;
 
       if (error) {
         console.error('Error searching orders:', error);
