@@ -273,13 +273,11 @@ const Checkout = () => {
     if (step === 'pix' && currentTransactionId) {
       const checkPaymentStatus = async () => {
         try {
-          const { data, error } = await supabase
-            .from('orders')
-            .select('status')
-            .eq('transaction_id', currentTransactionId)
-            .maybeSingle();
+          const { data: resp, error } = await supabase.functions.invoke('orders-lookup', {
+            body: { action: 'by_transaction', transaction_id: currentTransactionId },
+          });
 
-          if (!error && data?.status === 'paid') {
+          if (!error && resp?.data?.status === 'paid') {
             toast.success("Pagamento confirmado!");
             navigate('/pagamento-aprovado', { state: { transactionId: currentTransactionId, customerEmail: formData.email } });
           }
