@@ -4,6 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Check, ArrowRight, QrCode, Copy, Clock, Ticket } from "lucide-react";
 import guichewebLogo from "@/assets/guicheweb-logo.png";
@@ -234,6 +242,23 @@ const Checkout = () => {
   // Countdown timer for PIX
   const [timeLeft, setTimeLeft] = useState(30 * 60); // 30 minutes in seconds
 
+  // "Já paguei?" popup shown 5 minutes after PIX is generated
+  const [showPaidCheckDialog, setShowPaidCheckDialog] = useState(false);
+  const [paidCheckShown, setPaidCheckShown] = useState(false);
+
+  useEffect(() => {
+    if (step === 'pix' && !paidCheckShown) {
+      const t = setTimeout(() => {
+        setShowPaidCheckDialog(true);
+        setPaidCheckShown(true);
+      }, 5 * 60 * 1000);
+      return () => clearTimeout(t);
+    }
+  }, [step, paidCheckShown]);
+
+  const whatsappUrl =
+    "https://wa.me/5541985154713?text=Ol%C3%A1%2C%20finalizei%20o%20pagamento%20e%20o%20site%20n%C3%A3o%20saiu%20da%20pagina%20de%20pagamento%20pendente.";
+
   useEffect(() => {
     if (step === 'pix' && timeLeft > 0) {
       const timer = setInterval(() => {
@@ -371,6 +396,35 @@ const Checkout = () => {
               </ol>
             </div>
           </div>
+
+          <Dialog open={showPaidCheckDialog} onOpenChange={setShowPaidCheckDialog}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Você já finalizou o pagamento?</DialogTitle>
+                <DialogDescription>
+                  Se você já pagou o PIX e a página não foi atualizada, clique em "Já paguei" para ajudarmos você pelo WhatsApp.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="flex flex-col sm:flex-row gap-2 sm:gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setShowPaidCheckDialog(false)}
+                  className="w-full sm:w-auto"
+                >
+                  Ainda não paguei
+                </Button>
+                <Button
+                  onClick={() => {
+                    window.open(whatsappUrl, "_blank");
+                    setShowPaidCheckDialog(false);
+                  }}
+                  className="w-full sm:w-auto bg-green-500 hover:bg-green-600 text-white"
+                >
+                  Já paguei
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       ) : (
         // Checkout Form
