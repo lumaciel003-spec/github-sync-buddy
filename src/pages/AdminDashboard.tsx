@@ -68,8 +68,9 @@ const AdminDashboard = () => {
     setLoading(true);
     try {
       const token = sessionStorage.getItem("admin_token");
+      const admin_password = sessionStorage.getItem("admin_password");
       const { data: resp, error } = await supabase.functions.invoke("admin-orders", {
-        body: { token },
+        body: { token, admin_password },
       });
       if (error) throw error;
       setOrders(((resp?.data) || []) as unknown as Order[]);
