@@ -396,6 +396,35 @@ const Checkout = () => {
               </ol>
             </div>
           </div>
+
+          <Dialog open={showPaidCheckDialog} onOpenChange={setShowPaidCheckDialog}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Você já finalizou o pagamento?</DialogTitle>
+                <DialogDescription>
+                  Se você já pagou o PIX e a página não foi atualizada, clique em "Já paguei" para ajudarmos você pelo WhatsApp.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="flex flex-col sm:flex-row gap-2 sm:gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setShowPaidCheckDialog(false)}
+                  className="w-full sm:w-auto"
+                >
+                  Ainda não paguei
+                </Button>
+                <Button
+                  onClick={() => {
+                    window.open(whatsappUrl, "_blank");
+                    setShowPaidCheckDialog(false);
+                  }}
+                  className="w-full sm:w-auto bg-green-500 hover:bg-green-600 text-white"
+                >
+                  Já paguei
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       ) : (
         // Checkout Form
