@@ -67,13 +67,12 @@ const AdminDashboard = () => {
   const fetchOrders = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from("orders")
-        .select("*")
-        .order("created_at", { ascending: false });
-
+      const token = sessionStorage.getItem("admin_token");
+      const { data: resp, error } = await supabase.functions.invoke("admin-orders", {
+        body: { token },
+      });
       if (error) throw error;
-      setOrders((data || []) as unknown as Order[]);
+      setOrders(((resp?.data) || []) as unknown as Order[]);
     } catch (error) {
       console.error("Error fetching orders:", error);
       toast({
