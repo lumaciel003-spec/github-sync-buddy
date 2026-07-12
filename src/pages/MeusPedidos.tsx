@@ -58,11 +58,10 @@ const MeusPedidos = () => {
   const fetchOrderByTransaction = async (transactionId: string) => {
     setIsLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('transaction_id', transactionId)
-        .maybeSingle();
+      const { data: resp, error } = await supabase.functions.invoke('orders-lookup', {
+        body: { action: 'by_transaction', transaction_id: transactionId },
+      });
+      const data = resp?.data;
 
       if (error) {
         console.error('Error fetching order:', error);
