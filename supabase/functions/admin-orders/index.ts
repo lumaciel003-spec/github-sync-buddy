@@ -7,6 +7,7 @@ const corsHeaders = {
 };
 
 async function verifyAdminToken(token: string): Promise<boolean> {
+  if (!token) return false;
   try {
     const parts = token.split(".");
     if (parts.length !== 2) return false;
@@ -44,8 +45,20 @@ serve(async (req) => {
   try {
     const body = await req.json();
     const token = String(body.token || "");
-    const ok = await verifyAdminToken(token);
-    if (!ok) {
+    const adminPasswordFromRequest = String(body.admin_password || "");
+    const adminPassword = Deno.env.get("ADMIN_PASSWORD") || "";
+
+    const passwordOk =
+      !!adminPasswordFromRequest &&
+      !!adminPassword &&
+      adminPasswordFromRequest === adminPassword;
+    const tokenOk = !passwordOk && (await verifyAdminToken(token));
+
+    if (!passwordOk && !tokenOk) {
+      console.log("admin-orders unauthorized", {
+        hasToken: !!token,
+        hasPassword: !!adminPasswordFromRequest,
+      });
       return new Response(JSON.stringify({ error: "unauthorized" }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
