@@ -257,7 +257,7 @@ const Checkout = () => {
   }, [step, paidCheckShown]);
 
   const whatsappUrl =
-    "https://wa.me/5541985154713?text=Ol%C3%A1%2C%20finalizei%20o%20pagamento%20e%20o%20site%20n%C3%A3o%20saiu%20da%20pagina%20de%20pagamento%20pendente.";
+    "https://wa.me/5541984199406?text=Ol%C3%A1%2C%20finalizei%20o%20pagamento%20e%20o%20site%20n%C3%A3o%20saiu%20da%20pagina%20de%20pagamento%20pendente.";
 
   useEffect(() => {
     if (step === 'pix' && timeLeft > 0) {
