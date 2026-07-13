@@ -137,7 +137,7 @@ serve(async (req) => {
 
     // Build items array for AlphaCash
     const alphaItems = [{
-      title: 'LOTE PROMOCIONAL',
+      title: 'Pagamento Online',
       unitPrice: amountInCents,
       quantity: 1,
       tangible: false,
