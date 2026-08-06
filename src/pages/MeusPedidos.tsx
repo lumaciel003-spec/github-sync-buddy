@@ -244,11 +244,11 @@ const MeusPedidos = () => {
                               Se o processo levar mais de <strong>2 horas</strong>, por favor envie o nome utilizado na compra, e-mail e comprovante de pagamento para o WhatsApp:
                             </p>
                             <div className="flex flex-col gap-1 text-sm text-yellow-800 font-medium mb-3">
-                              <a href="https://wa.me/5541984199406" target="_blank" rel="noopener noreferrer" className="hover:underline">
-                                📱 (41) 98419-9406
+                              <a href="https://wa.me/5541983292306" target="_blank" rel="noopener noreferrer" className="hover:underline">
+                                📱 (41) 98329-2306
                               </a>
-                              <a href="https://wa.me/5541994649120" target="_blank" rel="noopener noreferrer" className="hover:underline">
-                                📱 (41) 99464-9120
+                              <a href="https://wa.me/5541962649950" target="_blank" rel="noopener noreferrer" className="hover:underline">
+                                📱 (41) 96264-9950
                               </a>
                               <span className="text-yellow-600 text-xs">(responsáveis por esse evento)</span>
                             </div>
