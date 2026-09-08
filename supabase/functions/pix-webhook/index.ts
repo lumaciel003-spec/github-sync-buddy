@@ -3,18 +3,43 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-webhook-signature',
 };
 
-// Function to send order to Utmify
+async function hmacHex(secret: string, body: string) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function mapStatus(raw: string): string {
+  switch ((raw || '').toUpperCase()) {
+    case 'APPROVED': return 'paid';
+    case 'REFUNDED': return 'refunded';
+    case 'REFUSED':
+    case 'CANCELLED':
+    case 'CANCELED':
+    case 'CHARGEBACK': return 'cancelled';
+    case 'IN_PROTEST':
+    case 'PRE_CHARGEBACK': return 'disputed';
+    default: return 'pending';
+  }
+}
+
 async function sendToUtmify(orderData: {
   orderId: string;
   status: 'waiting_payment' | 'paid' | 'refused' | 'refunded';
   createdAt: string;
   approvedDate: string | null;
   refundedAt: string | null;
-  customer: { name: string; email: string; phone: string; document: string; };
-  products: Array<{ id: string; name: string; quantity: number; priceInCents: number; }>;
+  customer: { name: string; email: string; phone: string; document: string };
+  products: Array<{ id: string; name: string; quantity: number; priceInCents: number }>;
   totalPriceInCents: number;
   gatewayFeeInCents: number;
 }) {
@@ -65,6 +90,9 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const clientId = Deno.env.get('STRATTONPAY_CLIENT_ID');
+    const clientSecret = Deno.env.get('STRATTONPAY_CLIENT_SECRET');
+    const webhookSecret = Deno.env.get('STRATTONPAY_WEBHOOK_SECRET');
 
     if (!supabaseUrl || !supabaseServiceKey) {
       console.error('Missing Supabase credentials');
@@ -74,148 +102,126 @@ serve(async (req) => {
       );
     }
 
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-    const payload = await req.json();
+    const rawBody = await req.text();
 
-    console.log('Received AlphaCash webhook:', JSON.stringify(payload));
-
-    // AlphaCash webhook structure:
-    // { type, url, objectId, data: { id, amount (cents), status, customer, pix, metadata (string), ... } }
-    const data = payload.data || payload;
-    const transactionId = String(data.id || payload.objectId || payload.id || '');
-    // Normalize AlphaCash statuses: 'approved' is treated as paid
-    let status = data.status;
-    if (status === 'approved') status = 'paid';
-    const amountInCents = data.amount;
-    const customer = data.customer || {};
-    let metadata: any = data.metadata || {};
-    if (typeof metadata === 'string') {
-      try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
-    }
-    const customerDoc = customer.document?.number || customer.document || metadata.customerCpf || '';
-
-    console.log('Parsed webhook data:', { transactionId, status, amountInCents });
-
-    // Parse items from metadata
-    let products = [{ id: 'ticket', name: 'Ingresso', quantity: 1, priceInCents: amountInCents }];
-    if (metadata.items) {
-      try {
-        const parsedItems = typeof metadata.items === 'string' ? JSON.parse(metadata.items) : metadata.items;
-        products = parsedItems.map((item: any, index: number) => ({
-          id: `ticket_${index}`,
-          name: item.name,
-          quantity: item.quantity,
-          priceInCents: Math.round(item.price * 100)
-        }));
-      } catch (e) {
-        console.log('Could not parse items from metadata');
+    if (webhookSecret) {
+      const provided = req.headers.get('x-webhook-signature') || '';
+      const expected = await hmacHex(webhookSecret, rawBody);
+      if (provided.toLowerCase() !== expected) {
+        console.error('Invalid webhook signature');
+        return new Response(
+          JSON.stringify({ error: 'Invalid signature' }),
+          { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
       }
     }
 
-    const nowUTC = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const payload = JSON.parse(rawBody || '{}');
+    console.log('Received StrattonPay webhook:', rawBody);
 
-    // Handle PAID status
-    if (status === 'paid') {
-      console.log('Payment confirmed! Transaction:', transactionId);
+    const tx = payload.transaction || payload.data || payload;
+    const txId = String(tx.id || '');
+    const externalId = tx.externalId ? String(tx.externalId) : '';
+    let rawStatus = tx.status || '';
 
-      const { data: orderData, error: updateError } = await supabase
+    // Source of truth: confirm status against the API
+    if (txId && clientId && clientSecret) {
+      try {
+        const credentials = btoa(`${clientId}:${clientSecret}`);
+        const check = await fetch(`https://app.strattonpay.com.br/api/v1/transactions/${txId}`, {
+          headers: { accept: 'application/json', authorization: `Basic ${credentials}` }
+        });
+        const checkText = await check.text();
+        console.log('StrattonPay verify response:', check.status, checkText);
+        if (check.ok) {
+          const checkData = JSON.parse(checkText || '{}');
+          const checkTx = checkData.transaction || checkData.data || checkData;
+          if (checkTx.status) rawStatus = checkTx.status;
+        }
+      } catch (e) {
+        console.error('Error verifying transaction:', e);
+      }
+    }
+
+    const status = mapStatus(rawStatus);
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // Find the order by externalId, fallback to transaction id
+    let order: any = null;
+    for (const candidate of [externalId, txId].filter(Boolean)) {
+      const { data, error } = await supabase
         .from('orders')
-        .update({ status: 'paid', updated_at: new Date().toISOString() })
-        .eq('transaction_id', transactionId)
-        .select()
+        .select('*')
+        .eq('transaction_id', candidate)
         .maybeSingle();
+      if (error) console.error('Error looking up order:', error);
+      if (data) { order = data; break; }
+    }
 
-      if (updateError) console.error('Error updating order:', updateError);
-      else if (orderData) console.log('Order updated to paid:', orderData.id);
-      else console.log('Order not found for transaction:', transactionId);
+    if (!order) {
+      console.log('Order not found for transaction:', { txId, externalId });
+      return new Response(
+        JSON.stringify({ received: true, status, transactionId: externalId || txId }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { error: updateError } = await supabase
+      .from('orders')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', order.id);
+
+    if (updateError) console.error('Error updating order:', updateError);
+    else console.log('Order updated:', order.id, status);
+
+    if (status === 'paid' || status === 'refunded') {
+      const nowUTC = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      const totalInCents = Math.round(Number(order.total_amount) * 100);
+
+      let products = [{ id: 'ticket', name: 'Pagamento Online', quantity: 1, priceInCents: totalInCents }];
+      try {
+        const parsed = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
+        if (Array.isArray(parsed) && parsed.length) {
+          products = parsed.map((item: any, index: number) => ({
+            id: `ticket_${index}`,
+            name: item.name,
+            quantity: item.quantity,
+            priceInCents: Math.round(Number(item.price) * 100)
+          }));
+        }
+      } catch {
+        console.log('Could not parse order items');
+      }
 
       const utmifyResult = await sendToUtmify({
-        orderId: transactionId,
-        status: 'paid',
-        createdAt: metadata.createdAt || nowUTC,
-        approvedDate: nowUTC,
-        refundedAt: null,
+        orderId: order.transaction_id,
+        status: status === 'paid' ? 'paid' : 'refunded',
+        createdAt: (order.created_at ? new Date(order.created_at).toISOString() : new Date().toISOString()).replace('T', ' ').substring(0, 19),
+        approvedDate: status === 'paid' ? nowUTC : null,
+        refundedAt: status === 'refunded' ? nowUTC : null,
         customer: {
-          name: customer.name || metadata.customerName || 'Cliente',
-          email: customer.email || metadata.customerEmail || '',
-          phone: customer.phone || metadata.customerPhone || '',
-          document: customerDoc
+          name: order.customer_name || 'Cliente',
+          email: order.customer_email || '',
+          phone: order.customer_phone || '',
+          document: order.customer_cpf || ''
         },
         products,
-        totalPriceInCents: amountInCents,
-        gatewayFeeInCents: Math.round(amountInCents * 0.0299)
+        totalPriceInCents: totalInCents,
+        gatewayFeeInCents: Math.round(totalInCents * 0.0299)
       });
 
-      console.log('Utmify paid result:', utmifyResult);
-
-      return new Response(
-        JSON.stringify({ received: true, status: 'paid', transactionId, utmifyNotified: utmifyResult.success, orderUpdated: !updateError }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+      console.log('Utmify result:', utmifyResult);
     }
 
-    // Handle REFUNDED status
-    if (status === 'refunded') {
-      console.log('Payment refunded! Transaction:', transactionId);
-
-      const { error: updateError } = await supabase
-        .from('orders')
-        .update({ status: 'refunded', updated_at: new Date().toISOString() })
-        .eq('transaction_id', transactionId);
-
-      if (updateError) console.error('Error updating order:', updateError);
-
-      const utmifyResult = await sendToUtmify({
-        orderId: transactionId,
-        status: 'refunded',
-        createdAt: metadata.createdAt || nowUTC,
-        approvedDate: null,
-        refundedAt: nowUTC,
-        customer: {
-          name: customer.name || metadata.customerName || 'Cliente',
-          email: customer.email || metadata.customerEmail || '',
-          phone: customer.phone || metadata.customerPhone || '',
-          document: customerDoc
-        },
-        products,
-        totalPriceInCents: amountInCents,
-        gatewayFeeInCents: Math.round(amountInCents * 0.0299)
-      });
-
-      console.log('Utmify refunded result:', utmifyResult);
-
-      return new Response(
-        JSON.stringify({ received: true, status: 'refunded', transactionId, utmifyNotified: utmifyResult.success }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Handle REFUSED / FAILED / EXPIRED / CANCELED / CHARGEBACK
-    if (['refused', 'failed', 'expired', 'canceled', 'cancelled', 'chargeback'].includes(status)) {
-      console.log(`Payment ${status}! Transaction:`, transactionId);
-
-      await supabase
-        .from('orders')
-        .update({ status, updated_at: new Date().toISOString() })
-        .eq('transaction_id', transactionId);
-
-      return new Response(
-        JSON.stringify({ received: true, status, transactionId }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Other statuses - acknowledge
     return new Response(
-      JSON.stringify({ received: true, status: status || 'unknown', transactionId }),
+      JSON.stringify({ received: true, status, transactionId: order.transaction_id }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
-
   } catch (error) {
     console.error('Error processing webhook:', error);
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      JSON.stringify({ received: true, error: error instanceof Error ? error.message : 'Unknown error' }),
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
 });

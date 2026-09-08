@@ -13,37 +13,21 @@ interface PaymentRequest {
   customerCpf: string;
   customerPhone: string;
   eventId?: string;
-  items: Array<{
-    name: string;
-    quantity: number;
-    price: number;
-  }>;
+  items: Array<{ name: string; quantity: number; price: number }>;
 }
 
-// Function to send order to Utmify
 async function sendToUtmify(orderData: {
   orderId: string;
   status: 'waiting_payment' | 'paid' | 'refused' | 'refunded';
   createdAt: string;
   approvedDate: string | null;
   refundedAt: string | null;
-  customer: {
-    name: string;
-    email: string;
-    phone: string;
-    document: string;
-  };
-  products: Array<{
-    id: string;
-    name: string;
-    quantity: number;
-    priceInCents: number;
-  }>;
+  customer: { name: string; email: string; phone: string; document: string };
+  products: Array<{ id: string; name: string; quantity: number; priceInCents: number }>;
   totalPriceInCents: number;
   gatewayFeeInCents: number;
 }) {
   const utmifyApiKey = Deno.env.get('UTMIFY_API_KEY');
-  
   if (!utmifyApiKey) {
     console.log('UTMIFY_API_KEY not configured, skipping');
     return { success: false, error: 'Missing API key' };
@@ -57,21 +41,8 @@ async function sendToUtmify(orderData: {
     createdAt: orderData.createdAt,
     approvedDate: orderData.approvedDate,
     refundedAt: orderData.refundedAt,
-    customer: {
-      name: orderData.customer.name,
-      email: orderData.customer.email,
-      phone: orderData.customer.phone,
-      document: orderData.customer.document,
-      country: 'BR'
-    },
-    products: orderData.products.map(p => ({
-      id: p.id,
-      name: p.name,
-      planId: null,
-      planName: null,
-      quantity: p.quantity,
-      priceInCents: p.priceInCents
-    })),
+    customer: { ...orderData.customer, country: 'BR' },
+    products: orderData.products.map(p => ({ ...p, planId: null, planName: null })),
     trackingParameters: {
       src: null, sck: null,
       utm_source: null, utm_campaign: null, utm_medium: null, utm_content: null, utm_term: null
@@ -104,13 +75,13 @@ serve(async (req) => {
   }
 
   try {
-    const alphaPublicKey = Deno.env.get('ALPHACASH_PUBLIC_KEY');
-    const alphaSecretKey = Deno.env.get('ALPHACASH_SECRET_KEY');
+    const clientId = Deno.env.get('STRATTONPAY_CLIENT_ID');
+    const clientSecret = Deno.env.get('STRATTONPAY_CLIENT_SECRET');
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
-    if (!alphaPublicKey || !alphaSecretKey) {
-      console.error('Missing AlphaCash API credentials');
+    if (!clientId || !clientSecret) {
+      console.error('Missing StrattonPay API credentials');
       return new Response(
         JSON.stringify({ error: 'Missing API credentials' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -128,71 +99,49 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     const { amount, customerName, customerEmail, customerCpf, customerPhone, eventId, items }: PaymentRequest = await req.json();
 
-    console.log('Creating PIX payment via AlphaCash:', { amount, customerName, customerEmail, eventId, itemsCount: items.length });
-
-    // AlphaCash uses Basic Auth: publicKey:secretKey
-    const credentials = btoa(`${alphaPublicKey}:${alphaSecretKey}`);
-
     const amountInCents = Math.round(amount * 100);
+    const idempotencyKey = `PIX_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const credentials = btoa(`${clientId}:${clientSecret}`);
+    const PRODUCT_TITLE = 'Pagamento Online';
 
-    // Build items array for AlphaCash
-    const alphaItems = [{
-      title: 'Pagamento Online',
-      unitPrice: amountInCents,
-      quantity: 1,
-      tangible: false,
-      externalRef: `gw_${Date.now()}`
-    }];
+    console.log('Creating PIX payment via StrattonPay:', { amountInCents, customerEmail, eventId, idempotencyKey });
 
-    // Build request body per AlphaCash API docs
     const requestBody = {
+      method: 'PIX',
       amount: amountInCents,
-      paymentMethod: 'pix',
-      items: alphaItems,
-      customer: {
+      payer: {
         name: customerName,
         email: customerEmail,
         phone: customerPhone.replace(/\D/g, ''),
-        document: {
-          number: customerCpf.replace(/\D/g, ''),
-          type: 'cpf'
-        }
+        document: { type: 'CPF', number: customerCpf.replace(/\D/g, '') }
       },
-      postbackUrl: `${supabaseUrl}/functions/v1/pix-webhook`,
-      metadata: JSON.stringify({
-        source: 'guicheweb',
-        eventId: eventId || null,
-        customerName,
-        customerEmail,
-        customerCpf: customerCpf.replace(/\D/g, ''),
-        customerPhone: customerPhone.replace(/\D/g, ''),
-        items
-      }),
-      externalRef: `gw_${Date.now()}`,
-      ip: '127.0.0.1'
+      items: [
+        { title: PRODUCT_TITLE, quantity: 1, unitPrice: amountInCents, tangible: false }
+      ],
+      metadata: {
+        provider_name: PRODUCT_TITLE,
+        source: PRODUCT_TITLE,
+        internal_transaction_id: idempotencyKey
+      }
     };
 
-    console.log('AlphaCash request body:', JSON.stringify(requestBody));
-
-    // Call AlphaCash API
-    const alphaResponse = await fetch('https://api.alphacashpay.com.br/v1/transactions', {
+    const response = await fetch('https://app.strattonpay.com.br/api/v1/transactions', {
       method: 'POST',
       headers: {
-        'Authorization': `Basic ${credentials}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
+        accept: 'application/json',
+        'content-type': 'application/json',
+        authorization: `Basic ${credentials}`,
+        'X-Idempotency-Key': idempotencyKey,
       },
       body: JSON.stringify(requestBody),
     });
 
-    console.log('AlphaCash response status:', alphaResponse.status);
+    const responseText = await response.text();
+    console.log('StrattonPay response:', response.status, responseText);
 
-    const responseText = await alphaResponse.text();
-    console.log('AlphaCash response text:', responseText);
-
-    let alphaData;
+    let data: any;
     try {
-      alphaData = responseText ? JSON.parse(responseText) : {};
+      data = responseText ? JSON.parse(responseText) : {};
     } catch (parseError) {
       console.error('Failed to parse response:', parseError);
       return new Response(
@@ -201,48 +150,41 @@ serve(async (req) => {
       );
     }
 
-    if (!alphaResponse.ok) {
-      console.error('AlphaCash API error:', alphaData);
-
-      const errorMessage = JSON.stringify(alphaData).toLowerCase();
-      const isCpfError = errorMessage.includes('cpf') || errorMessage.includes('document') || errorMessage.includes('invalid');
-
+    if (!response.ok) {
+      const errorMessage = JSON.stringify(data).toLowerCase();
+      const isCpfError = errorMessage.includes('cpf') || errorMessage.includes('document');
       return new Response(
         JSON.stringify({
           error: isCpfError ? 'CPF inválido ou incorreto' : 'Failed to create PIX payment',
-          details: alphaData,
+          details: data,
           isCpfError
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // AlphaCash response: data.pix.qrcode contains the PIX copia-e-cola
-    const transactionData = alphaData.data || alphaData;
-    const transactionId = String(transactionData.id);
-    const pixData = transactionData.pix;
-    const copiaCola = pixData?.qrcode;
+    const tx = data.transaction || data.data || data;
+    const qrcode = tx.qrcode || data.qrcode || {};
+    const copiaCola = qrcode.code;
 
     if (!copiaCola) {
-      console.error('Missing QR code data in response:', alphaData);
+      console.error('Missing QR code data in response:', data);
       return new Response(
-        JSON.stringify({ error: 'Invalid response from payment provider', debug: alphaData }),
+        JSON.stringify({ error: 'Invalid response from payment provider', debug: data }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Generate QR code image URL from the PIX code
-    const qrCodeUrl = copiaCola.startsWith('http')
-      ? copiaCola
+    const qrCodeUrl = qrcode.base64
+      ? (String(qrcode.base64).startsWith('data:') ? qrcode.base64 : `data:image/png;base64,${qrcode.base64}`)
       : `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(copiaCola)}`;
 
-    const pixCopiaCola = copiaCola;
+    const transactionId = String(tx.externalId || tx.id || idempotencyKey);
 
-    // Save order to database
     const { error: insertError } = await supabase
       .from('orders')
       .insert({
-        transaction_id: transactionId || `AC_${Date.now()}`,
+        transaction_id: transactionId,
         customer_name: customerName,
         customer_email: customerEmail,
         customer_cpf: customerCpf.replace(/\D/g, ''),
@@ -253,23 +195,12 @@ serve(async (req) => {
         event_id: eventId || null
       });
 
-    if (insertError) {
-      console.error('Error saving order to database:', insertError);
-    } else {
-      console.log('Order saved to database with pending status');
-    }
+    if (insertError) console.error('Error saving order to database:', insertError);
+    else console.log('Order saved with pending status:', transactionId);
 
-    // Send waiting_payment to Utmify
     const createdAtUTC = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const utmifyProducts = items.map((item, index) => ({
-      id: `ticket_${index}`,
-      name: item.name,
-      quantity: item.quantity,
-      priceInCents: Math.round(item.price * 100)
-    }));
-
     const utmifyResult = await sendToUtmify({
-      orderId: transactionId || `AC_${Date.now()}`,
+      orderId: transactionId,
       status: 'waiting_payment',
       createdAt: createdAtUTC,
       approvedDate: null,
@@ -280,7 +211,12 @@ serve(async (req) => {
         phone: customerPhone.replace(/\D/g, ''),
         document: customerCpf.replace(/\D/g, '')
       },
-      products: utmifyProducts,
+      products: items.map((item, index) => ({
+        id: `ticket_${index}`,
+        name: item.name,
+        quantity: item.quantity,
+        priceInCents: Math.round(item.price * 100)
+      })),
       totalPriceInCents: amountInCents,
       gatewayFeeInCents: Math.round(amountInCents * 0.0299)
     });
@@ -290,9 +226,9 @@ serve(async (req) => {
     return new Response(
       JSON.stringify({
         qrCode: qrCodeUrl,
-        copiaCola: pixCopiaCola,
-        transactionId: transactionId,
-        status: transactionData.status || 'pending',
+        copiaCola,
+        transactionId,
+        status: 'PENDING',
         externalId: transactionId
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
