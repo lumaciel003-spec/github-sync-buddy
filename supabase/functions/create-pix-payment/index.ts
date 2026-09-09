@@ -75,13 +75,13 @@ serve(async (req) => {
   }
 
   try {
-    const clientId = Deno.env.get('STRATTONPAY_CLIENT_ID');
-    const clientSecret = Deno.env.get('STRATTONPAY_CLIENT_SECRET');
+    // Velana authenticates with Basic auth: base64("{SECRET_KEY}:x")
+    const secretKey = Deno.env.get('VELANA_SECRET_KEY') || Deno.env.get('STRIPE_LIVE_API_KEY');
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
 
-    if (!clientId || !clientSecret) {
-      console.error('Missing StrattonPay API credentials');
+    if (!secretKey) {
+      console.error('Missing Velana secret key');
       return new Response(
         JSON.stringify({ error: 'Missing API credentials' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -100,44 +100,43 @@ serve(async (req) => {
     const { amount, customerName, customerEmail, customerCpf, customerPhone, eventId, items }: PaymentRequest = await req.json();
 
     const amountInCents = Math.round(amount * 100);
-    const idempotencyKey = `PIX_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    const credentials = btoa(`${clientId}:${clientSecret}`);
+    const credentials = btoa(`${secretKey}:x`);
     const PRODUCT_TITLE = 'Pagamento Online';
+    const cpfDigits = customerCpf.replace(/\D/g, '');
+    const phoneDigits = customerPhone.replace(/\D/g, '');
 
-    console.log('Creating PIX payment via StrattonPay:', { amountInCents, customerEmail, eventId, idempotencyKey });
+    console.log('Creating PIX payment via Velana:', { amountInCents, customerEmail, eventId });
 
     const requestBody = {
-      method: 'PIX',
       amount: amountInCents,
-      payer: {
+      paymentMethod: 'pix',
+      customer: {
         name: customerName,
         email: customerEmail,
-        phone: customerPhone.replace(/\D/g, ''),
-        document: { type: 'CPF', number: customerCpf.replace(/\D/g, '') }
+        phone: phoneDigits,
+        document: { number: cpfDigits, type: 'cpf' }
       },
       items: [
-        { title: PRODUCT_TITLE, quantity: 1, unitPrice: amountInCents, tangible: false }
+        { title: PRODUCT_TITLE, unitPrice: amountInCents, quantity: 1, tangible: false }
       ],
-      metadata: {
-        provider_name: PRODUCT_TITLE,
-        source: PRODUCT_TITLE,
-        internal_transaction_id: idempotencyKey
-      }
+      pix: { expiresInDays: 1 },
+      postbackUrl: `${supabaseUrl}/functions/v1/pix-webhook`,
+      metadata: JSON.stringify({ provider_name: PRODUCT_TITLE, event_id: eventId || null }),
+      traceable: false
     };
 
-    const response = await fetch('https://app.strattonpay.com.br/api/v1/transactions', {
+    const response = await fetch('https://api.velana.com.br/v1/transactions', {
       method: 'POST',
       headers: {
         accept: 'application/json',
         'content-type': 'application/json',
         authorization: `Basic ${credentials}`,
-        'X-Idempotency-Key': idempotencyKey,
       },
       body: JSON.stringify(requestBody),
     });
 
     const responseText = await response.text();
-    console.log('StrattonPay response:', response.status, responseText);
+    console.log('Velana response:', response.status, responseText);
 
     let data: any;
     try {
@@ -163,9 +162,9 @@ serve(async (req) => {
       );
     }
 
-    const tx = data.transaction || data.data || data;
-    const qrcode = tx.qrcode || data.qrcode || {};
-    const copiaCola = qrcode.code;
+    const tx = data.data || data.transaction || data;
+    const pix = tx.pix || {};
+    const copiaCola = pix.qrcode;
 
     if (!copiaCola) {
       console.error('Missing QR code data in response:', data);
@@ -175,11 +174,8 @@ serve(async (req) => {
       );
     }
 
-    const qrCodeUrl = qrcode.base64
-      ? (String(qrcode.base64).startsWith('data:') ? qrcode.base64 : `data:image/png;base64,${qrcode.base64}`)
-      : `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(copiaCola)}`;
-
-    const transactionId = String(tx.externalId || tx.id || idempotencyKey);
+    const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(copiaCola)}`;
+    const transactionId = String(tx.id);
 
     const { error: insertError } = await supabase
       .from('orders')
@@ -187,8 +183,8 @@ serve(async (req) => {
         transaction_id: transactionId,
         customer_name: customerName,
         customer_email: customerEmail,
-        customer_cpf: customerCpf.replace(/\D/g, ''),
-        customer_phone: customerPhone.replace(/\D/g, ''),
+        customer_cpf: cpfDigits,
+        customer_phone: phoneDigits,
         items: items,
         total_amount: amount,
         status: 'pending',
@@ -208,8 +204,8 @@ serve(async (req) => {
       customer: {
         name: customerName,
         email: customerEmail,
-        phone: customerPhone.replace(/\D/g, ''),
-        document: customerCpf.replace(/\D/g, '')
+        phone: phoneDigits,
+        document: cpfDigits
       },
       products: items.map((item, index) => ({
         id: `ticket_${index}`,
