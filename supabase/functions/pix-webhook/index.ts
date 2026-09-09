@@ -6,28 +6,17 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-webhook-signature',
 };
 
-async function hmacHex(secret: string, body: string) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body));
-  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
 function mapStatus(raw: string): string {
-  switch ((raw || '').toUpperCase()) {
-    case 'APPROVED': return 'paid';
-    case 'REFUNDED': return 'refunded';
-    case 'REFUSED':
-    case 'CANCELLED':
-    case 'CANCELED':
-    case 'CHARGEBACK': return 'cancelled';
-    case 'IN_PROTEST':
-    case 'PRE_CHARGEBACK': return 'disputed';
+  switch ((raw || '').toLowerCase()) {
+    case 'paid':
+    case 'authorized':
+    case 'partially_paid': return 'paid';
+    case 'refunded': return 'refunded';
+    case 'refused':
+    case 'canceled':
+    case 'cancelled':
+    case 'chargedback': return 'cancelled';
+    case 'in_protest': return 'disputed';
     default: return 'pending';
   }
 }
@@ -90,9 +79,7 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    const clientId = Deno.env.get('STRATTONPAY_CLIENT_ID');
-    const clientSecret = Deno.env.get('STRATTONPAY_CLIENT_SECRET');
-    const webhookSecret = Deno.env.get('STRATTONPAY_WEBHOOK_SECRET');
+    const secretKey = Deno.env.get('VELANA_SECRET_KEY') || Deno.env.get('STRIPE_LIVE_API_KEY');
 
     if (!supabaseUrl || !supabaseServiceKey) {
       console.error('Missing Supabase credentials');
@@ -103,53 +90,35 @@ serve(async (req) => {
     }
 
     const rawBody = await req.text();
-
-    // Signature check (best-effort). StrattonPay may use different header names /
-    // formats, so a mismatch does NOT reject the webhook: instead we only trust
-    // the status returned by the StrattonPay API itself (see verification below).
-    let signatureOk = false;
-    if (webhookSecret) {
-      const expected = await hmacHex(webhookSecret, rawBody);
-      const candidates = [
-        'x-webhook-signature', 'x-signature', 'signature',
-        'x-hub-signature-256', 'x-strattonpay-signature', 'x-stratton-signature'
-      ]
-        .map((h) => req.headers.get(h) || '')
-        .filter(Boolean)
-        .map((v) => v.replace(/^sha256=/i, '').trim().toLowerCase());
-
-      signatureOk =
-        candidates.includes(expected) ||
-        candidates.includes(webhookSecret.toLowerCase());
-
-      if (!signatureOk) {
-        console.warn('Webhook signature not matched, will rely on API verification', {
-          headers: Object.fromEntries(req.headers),
-        });
-      }
-    }
-
+    console.log('Received Velana postback:', rawBody);
     const payload = JSON.parse(rawBody || '{}');
-    console.log('Received StrattonPay webhook:', rawBody);
 
-    const tx = payload.transaction || payload.data || payload;
-    const txId = String(tx.id || '');
-    const externalId = tx.externalId ? String(tx.externalId) : '';
+    // Velana postback: { id, type: "transaction", objectId, url, data: { ...transaction } }
+    const tx = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+    const txId = String(tx.id ?? payload.objectId ?? '');
     let rawStatus = tx.status || '';
 
-    // Source of truth: confirm status against the API
+    if (!txId) {
+      console.log('Postback without transaction id, ignoring');
+      return new Response(
+        JSON.stringify({ received: true }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Source of truth: confirm the status against the Velana API
     let apiVerified = false;
-    if (txId && clientId && clientSecret) {
+    if (secretKey) {
       try {
-        const credentials = btoa(`${clientId}:${clientSecret}`);
-        const check = await fetch(`https://app.strattonpay.com.br/api/v1/transactions/${txId}`, {
+        const credentials = btoa(`${secretKey}:x`);
+        const check = await fetch(`https://api.velana.com.br/v1/transactions/${txId}`, {
           headers: { accept: 'application/json', authorization: `Basic ${credentials}` }
         });
         const checkText = await check.text();
-        console.log('StrattonPay verify response:', check.status, checkText);
+        console.log('Velana verify response:', check.status, checkText);
         if (check.ok) {
           const checkData = JSON.parse(checkText || '{}');
-          const checkTx = checkData.transaction || checkData.data || checkData;
+          const checkTx = checkData.data || checkData;
           if (checkTx.status) {
             rawStatus = checkTx.status;
             apiVerified = true;
@@ -160,8 +129,8 @@ serve(async (req) => {
       }
     }
 
-    if (!signatureOk && !apiVerified) {
-      console.error('Unverified webhook (bad signature and no API confirmation), ignoring');
+    if (!apiVerified) {
+      console.error('Could not confirm transaction with Velana API, ignoring');
       return new Response(
         JSON.stringify({ error: 'Unverified webhook' }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -171,22 +140,18 @@ serve(async (req) => {
     const status = mapStatus(rawStatus);
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Find the order by externalId, fallback to transaction id
-    let order: any = null;
-    for (const candidate of [externalId, txId].filter(Boolean)) {
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('transaction_id', candidate)
-        .maybeSingle();
-      if (error) console.error('Error looking up order:', error);
-      if (data) { order = data; break; }
-    }
+    const { data: order, error: lookupError } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('transaction_id', txId)
+      .maybeSingle();
+
+    if (lookupError) console.error('Error looking up order:', lookupError);
 
     if (!order) {
-      console.log('Order not found for transaction:', { txId, externalId });
+      console.log('Order not found for transaction:', txId);
       return new Response(
-        JSON.stringify({ received: true, status, transactionId: externalId || txId }),
+        JSON.stringify({ received: true, status, transactionId: txId }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
