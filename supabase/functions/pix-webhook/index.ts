@@ -104,15 +104,28 @@ serve(async (req) => {
 
     const rawBody = await req.text();
 
+    // Signature check (best-effort). StrattonPay may use different header names /
+    // formats, so a mismatch does NOT reject the webhook: instead we only trust
+    // the status returned by the StrattonPay API itself (see verification below).
+    let signatureOk = false;
     if (webhookSecret) {
-      const provided = req.headers.get('x-webhook-signature') || '';
       const expected = await hmacHex(webhookSecret, rawBody);
-      if (provided.toLowerCase() !== expected) {
-        console.error('Invalid webhook signature');
-        return new Response(
-          JSON.stringify({ error: 'Invalid signature' }),
-          { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
+      const candidates = [
+        'x-webhook-signature', 'x-signature', 'signature',
+        'x-hub-signature-256', 'x-strattonpay-signature', 'x-stratton-signature'
+      ]
+        .map((h) => req.headers.get(h) || '')
+        .filter(Boolean)
+        .map((v) => v.replace(/^sha256=/i, '').trim().toLowerCase());
+
+      signatureOk =
+        candidates.includes(expected) ||
+        candidates.includes(webhookSecret.toLowerCase());
+
+      if (!signatureOk) {
+        console.warn('Webhook signature not matched, will rely on API verification', {
+          headers: Object.fromEntries(req.headers),
+        });
       }
     }
 
@@ -125,6 +138,7 @@ serve(async (req) => {
     let rawStatus = tx.status || '';
 
     // Source of truth: confirm status against the API
+    let apiVerified = false;
     if (txId && clientId && clientSecret) {
       try {
         const credentials = btoa(`${clientId}:${clientSecret}`);
@@ -136,11 +150,22 @@ serve(async (req) => {
         if (check.ok) {
           const checkData = JSON.parse(checkText || '{}');
           const checkTx = checkData.transaction || checkData.data || checkData;
-          if (checkTx.status) rawStatus = checkTx.status;
+          if (checkTx.status) {
+            rawStatus = checkTx.status;
+            apiVerified = true;
+          }
         }
       } catch (e) {
         console.error('Error verifying transaction:', e);
       }
+    }
+
+    if (!signatureOk && !apiVerified) {
+      console.error('Unverified webhook (bad signature and no API confirmation), ignoring');
+      return new Response(
+        JSON.stringify({ error: 'Unverified webhook' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     const status = mapStatus(rawStatus);
