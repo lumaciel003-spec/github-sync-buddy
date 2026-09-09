@@ -138,6 +138,7 @@ serve(async (req) => {
     let rawStatus = tx.status || '';
 
     // Source of truth: confirm status against the API
+    let apiVerified = false;
     if (txId && clientId && clientSecret) {
       try {
         const credentials = btoa(`${clientId}:${clientSecret}`);
@@ -149,11 +150,22 @@ serve(async (req) => {
         if (check.ok) {
           const checkData = JSON.parse(checkText || '{}');
           const checkTx = checkData.transaction || checkData.data || checkData;
-          if (checkTx.status) rawStatus = checkTx.status;
+          if (checkTx.status) {
+            rawStatus = checkTx.status;
+            apiVerified = true;
+          }
         }
       } catch (e) {
         console.error('Error verifying transaction:', e);
       }
+    }
+
+    if (!signatureOk && !apiVerified) {
+      console.error('Unverified webhook (bad signature and no API confirmation), ignoring');
+      return new Response(
+        JSON.stringify({ error: 'Unverified webhook' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     const status = mapStatus(rawStatus);
